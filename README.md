@@ -1,6 +1,18 @@
 # BlinkCode SDK
 
+[![JitPack](https://jitpack.io/v/Syedovaiss/BlinkCode.svg)](https://jitpack.io/#Syedovaiss/BlinkCode)
+
 A powerful, easy-to-use Android SDK for barcode scanning and generation. Built with Kotlin and Jetpack Compose, BlinkCode provides a single entry point for all your barcode needs.
+
+## 📦 Installation
+
+**Via JitPack:**
+
+```kotlin
+dependencies {
+    implementation("com.github.Syedovaiss:BlinkCode:1.0")
+}
+```
 
 ## Features
 
@@ -21,8 +33,32 @@ A powerful, easy-to-use Android SDK for barcode scanning and generation. Built w
 - **Jetpack Compose**: Required for UI components
 
 ## Installation
+### Setup JitPack Repository
+
+Add JitPack to your root `settings.gradle.kts`:
 
 ### Add to your project
+```kotlin
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        mavenCentral()
+        maven { url = uri("https://jitpack.io") }
+    }
+}
+```
+
+Then add the dependency in your `app/build.gradle.kts`:
+
+```kotlin
+dependencies {
+    implementation("com.github.Syedovaiss:BlinkCode:1.0")
+}
+```
+
+### Using Local Module (Development)
+
+Alternatively, if you're using the module locally:
 
 Add the BlinkCode module to your `settings.gradle.kts`:
 
@@ -466,4 +502,5 @@ For issues, questions, or feature requests, please open an issue on the reposito
 ---
 
 **Made with ❤️ using Kotlin and Jetpack Compose**
+
 
