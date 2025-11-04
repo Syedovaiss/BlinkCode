@@ -7,6 +7,7 @@ import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -41,9 +42,9 @@ import java.util.concurrent.TimeUnit
 @Composable
 fun BlinkCodeCameraView(
     onBarcodeDetected: (String) -> Unit,
-    onError: ((Throwable) -> Unit)? = null,
-    viewModel: BarcodeScannerViewModel = koinViewModel()
+    onError: ((Throwable) -> Unit)? = null
 ) {
+    val viewModel: BarcodeScannerViewModel = koinViewModel()
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val hasCameraPermission by viewModel.hasCameraPermissions.collectAsStateWithLifecycle()
@@ -72,85 +73,142 @@ fun BlinkCodeCameraView(
     }
 
     val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
+    var cameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
+    var analyzer by remember { mutableStateOf<ImageAnalysis?>(null) }
+    var isCameraBound by remember { mutableStateOf(false) }
 
-    if (permissionChecked && permissionError == null) {
-        AndroidView(factory = { ctx ->
-            val previewView = PreviewView(ctx)
-            val coroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    // Setup camera provider when permission is granted
+    LaunchedEffect(permissionChecked, permissionError) {
+        if (permissionChecked && permissionError == null && cameraProvider == null) {
+            try {
+                val provider = cameraProviderFuture.get()
+                cameraProvider = provider
+            } catch (e: Exception) {
+                Timber.e(e, "Error getting camera provider")
+                onError?.invoke(e)
+            }
+        }
+    }
 
-            cameraProviderFuture.addListener({
-                try {
-                    val cameraProvider = cameraProviderFuture.get()
-                    val preview = Preview.Builder().build().apply {
-                        surfaceProvider = previewView.surfaceProvider
-                    }
+    // Cleanup camera when composable is disposed
+    DisposableEffect(Unit) {
+        onDispose {
+            try {
+                if (isCameraBound) {
+                    analyzer?.clearAnalyzer()
+                    cameraProvider?.unbindAll()
+                    analyzer = null
+                    isCameraBound = false
+                    Timber.d("Camera resources cleaned up")
+                }
+            } catch (e: Exception) {
+                Timber.e(e, "Error cleaning up camera resources")
+            }
+        }
+    }
 
-                    val barcodeScanner = BarcodeScanning.getClient()
-                    val analyzer = ImageAnalysis.Builder()
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .build()
+    if (permissionChecked && permissionError == null && cameraProvider != null) {
+        AndroidView(
+            factory = { ctx ->
+                val pv = PreviewView(ctx)
+                val coroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
-                    analyzer.setAnalyzer(ContextCompat.getMainExecutor(ctx)) { imageProxy ->
-                        val mediaImage = imageProxy.image
-                        if (mediaImage != null) {
-                            val currentTime = System.currentTimeMillis()
+                val provider = cameraProvider ?: return@AndroidView pv
 
-                            // Throttle scanning to prevent too frequent scans
-                            if (throttle.shouldExecute(currentTime)) {
-                                val inputImage = InputImage.fromMediaImage(
-                                    mediaImage,
-                                    imageProxy.imageInfo.rotationDegrees
-                                )
+                // Only bind if not already bound
+                if (!isCameraBound) {
+                    try {
+                        // Unbind all existing use cases first to prevent conflicts
+                        provider.unbindAll()
 
-                                barcodeScanner.process(inputImage)
-                                    .addOnSuccessListener { barcodes ->
-                                        coroutineScope.launch {
-                                            barcodes.forEach { barcode ->
-                                                barcode.rawValue?.let { value ->
-                                                    try {
-                                                        onBarcodeDetected(value)
-                                                    } catch (e: Exception) {
-                                                        Timber.e(
-                                                            e,
-                                                            "Error in onBarcodeDetected callback"
-                                                        )
-                                                        onError?.invoke(e)
+                        val preview = Preview.Builder().build().apply {
+                            surfaceProvider = pv.surfaceProvider
+                        }
+
+                        val barcodeScanner = BarcodeScanning.getClient()
+                        val imageAnalysis = ImageAnalysis.Builder()
+                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                            .build()
+                            .also { analyzer = it }
+
+                        imageAnalysis.setAnalyzer(ContextCompat.getMainExecutor(ctx)) { imageProxy ->
+                            val mediaImage = imageProxy.image
+                            if (mediaImage != null) {
+                                val currentTime = System.currentTimeMillis()
+
+                                // Throttle scanning to prevent too frequent scans
+                                if (throttle.shouldExecute(currentTime)) {
+                                    val inputImage = InputImage.fromMediaImage(
+                                        mediaImage,
+                                        imageProxy.imageInfo.rotationDegrees
+                                    )
+
+                                    barcodeScanner.process(inputImage)
+                                        .addOnSuccessListener { barcodes ->
+                                            coroutineScope.launch {
+                                                barcodes.forEach { barcode ->
+                                                    barcode.rawValue?.let { value ->
+                                                        try {
+                                                            onBarcodeDetected(value)
+                                                        } catch (e: Exception) {
+                                                            Timber.e(
+                                                                e,
+                                                                "Error in onBarcodeDetected callback"
+                                                            )
+                                                            onError?.invoke(e)
+                                                        }
                                                     }
                                                 }
                                             }
                                         }
-                                    }
-                                    .addOnFailureListener { exception ->
-                                        Timber.e(exception, "Error scanning barcode")
-                                        onError?.invoke(exception)
-                                        imageProxy.close()
-                                    }
-                                    .addOnCompleteListener {
-                                        imageProxy.close()
-                                    }
+                                        .addOnFailureListener { exception ->
+                                            Timber.e(exception, "Error scanning barcode")
+                                            onError?.invoke(exception)
+                                            imageProxy.close()
+                                        }
+                                        .addOnCompleteListener {
+                                            imageProxy.close()
+                                        }
+                                } else {
+                                    // Skip this frame due to throttling
+                                    imageProxy.close()
+                                }
                             } else {
-                                // Skip this frame due to throttling
                                 imageProxy.close()
                             }
-                        } else {
-                            imageProxy.close()
                         }
+
+                        val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+                        provider.bindToLifecycle(
+                            lifecycleOwner,
+                            cameraSelector,
+                            preview,
+                            imageAnalysis
+                        )
+                        isCameraBound = true
+                        Timber.d("Camera bound successfully")
+                    } catch (e: Exception) {
+                        Timber.e(e, "Error setting up camera")
+                        onError?.invoke(e)
                     }
-
-                    val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-                    cameraProvider.bindToLifecycle(
-                        lifecycleOwner,
-                        cameraSelector,
-                        preview,
-                        analyzer
-                    )
-                } catch (e: Exception) {
-                    Timber.e(e, "Error setting up camera")
-                    onError?.invoke(e)
                 }
-            }, ContextCompat.getMainExecutor(ctx))
 
-            previewView
-        })
+                pv
+            },
+            onRelease = {
+                // Cleanup when view is released
+                try {
+                    if (isCameraBound) {
+                        analyzer?.clearAnalyzer()
+                        cameraProvider?.unbindAll()
+                        analyzer = null
+                        isCameraBound = false
+                        Timber.d("Camera view released")
+                    }
+                } catch (e: Exception) {
+                    Timber.e(e, "Error releasing camera view")
+                }
+            }
+        )
     }
 }
